@@ -28,7 +28,7 @@ def get_ta(df, mt):
 def get_ta_windows(df,mts):
     TA = []
     for mt in mts:
-        TA.append(get_ta1(df,mt))
+        TA.append(get_ta(df,mt))
     TA = pd.concat(TA,axis=1)
     TA = TA.loc[:,~TA.columns.duplicated()]
     TA = TA.reindex(sorted(TA.columns),axis=1)
