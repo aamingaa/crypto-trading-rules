@@ -372,6 +372,26 @@ def get_rsi(price,windows):
         df['rsi_{}'.format(w)] = ta.momentum.rsi(price,w)
     return df
 
+def get_my_rsi(price,windows):
+    df = pd.DataFrame()
+    for w in windows:
+        rsi = ta.momentum.rsi(price,window=w)
+        # overbought
+        d1 = (rsi > 70)
+        # oversold
+        u1 = (rsi < 30)
+        # up trend
+        u2 = ~(d1)&~(u1)&(rsi.pct_change() >= 0)
+        #down trend
+        d2 = ~(d1)&~(u1)& (rsi.pct_change() <0)
+
+        rsi_ind = rsi.dropna().copy()
+        rsi_ind.loc[d1] = -1;rsi_ind.loc[d2] = -1
+        rsi_ind.loc[u1] = 1;rsi_ind.loc[u2] = 1
+        df['rsi_{}'.format(w)] = rsi_ind[1:]
+    return df
+
+
 def get_rsi_decision(close,windows):
     df = pd.DataFrame()
     for w in windows:
