@@ -193,78 +193,80 @@ def get_wallet(close, barrier, initial_money=0, bet_size=None):
     return out
 
 
-def get_wallet_v2(close, barrier, initial_money=0, bet_size=None, fee_rate=0.0006, slippage=0.0001):
+def get_wallet_v2(close, barrier, initial_money=10000, bet_size=None, fee_rate=0.0006, slippage=0.0001):
     """
-    考虑手续费和滑点的钱包/持仓计算函数
+    高度可靠的钱包/持仓核算函数（针对 15min 加密货币回测优化）
     
-    :param close: 价格序列 (pd.Series)
-    :param barrier: 障碍输出 (pd.DataFrame)，必须包含 'exit' 列（退出时间戳）
-    :param initial_money: 初始资金
-    :param bet_size: 下注数量序列，如果为 None 则每笔交易 1 个单位
-    :param fee_rate: 单边手续费率 (例如 0.0006 代表万六)
-    :param slippage: 滑点百分比 (例如 0.0001 代表 0.01% 的滑点)
-    :return: 包含资金和持仓变化的 DataFrame
+    :param close: 原始价格序列 (pd.Series)
+    :param barrier: get_barrier 的输出 (pd.DataFrame)，必须包含 'exit' 列
+    :param initial_money: 初始账户现金
+    :param bet_size: 下注数量（单位：枚/个）。如果是 None，则默认为每笔交易 1 个单位
+    :param fee_rate: 单边手续费率 (0.0006 = 万六)
+    :param slippage: 滑点百分比 (0.0001 = 0.01%)
     """
-    close = close.round(2)
+    # 确保索引是 datetime 格式
+    close.index = pd.to_datetime(close.index)
+    barrier.index = pd.to_datetime(barrier.index)
     
-    # 1. 确定下注数量
+    # 1. 准备下注数据
     if bet_size is None:
-        bet_size = pd.Series(np.ones(len(close)), index=close.index)
-    bet_amount = bet_size.loc[barrier.index]
+        bet_size = pd.Series(1.0, index=barrier.index)
+    else:
+        bet_size = bet_size.loc[barrier.index]
 
-    # 2. 计算买入支出 (Money Spent)
-    # 实际买入价 = 现价 * (1 + 滑点)
+    # 2. 计算【买入】详情 (Entry)
+    # 考虑滑点后的买入成交价
     buy_price = close.loc[barrier.index] * (1 + slippage)
-    # 支出 = 数量 * 价格 * (1 + 手续费率)
-    spend = (bet_amount * buy_price) * (1 + fee_rate)
-
-    # 3. 计算卖出收入 (Money Receive)
-    # 找到退出时的价格
-    exit_indices = barrier.exit.dropna()
-    exit_prices = close.loc[exit_indices].values
-    # 实际卖出价 = 现价 * (1 - 滑点)
-    sell_price = exit_prices * (1 - slippage)
-    # 收入 = 数量 * 卖出价 * (1 - 手续费率)
-    # 注意：这里关联的是进入时的索引
-    receive_at_entry = pd.Series(sell_price * bet_amount.loc[exit_indices.index].values, 
-                                 index=exit_indices.index)
+    # 总支出 = 成交额 + 手续费
+    money_spent = (bet_size * buy_price) * (1 + fee_rate)
     
-    # 将收入归纳到“退出时间点”
-    close_exit = pd.Series(receive_at_entry.values, index=barrier.exit.dropna())
-    close_exit = close_exit.groupby(level=0).sum().rename('money_receive')
-
-    # 4. 构建基础钱包 DataFrame (以时间轴为索引)
-    # 我们需要一个完整的时间索引来处理资金和持仓的累积
-    all_indices = close.index
-    wallet_base = pd.DataFrame(index=all_indices)
+    # 3. 计算【卖出】详情 (Exit)
+    # 仅处理有明确退出信号的交易
+    exited_mask = barrier['exit'].notna()
+    exit_times = pd.to_datetime(barrier.loc[exited_mask, 'exit'])
+    entry_times_of_exited = barrier.loc[exited_mask].index
     
-    # 记录每笔交易的买入点和金额
-    entry_data = pd.DataFrame({'money_spent': spend}, index=barrier.index)
-    entry_data = entry_data.groupby(level=0).sum()
+    # 退出时的市场价
+    exit_market_prices = close.loc[exit_times].values
+    # 考虑滑点后的卖出成交价
+    sell_price = exit_market_prices * (1 - slippage)
+    # 总收入 = 成交额 - 手续费
+    money_received_vals = (bet_size.loc[entry_times_of_exited].values * sell_price) * (1 - fee_rate)
     
-    # 合并数据
-    out = wallet_base.join(entry_data).join(close_exit).fillna(0)
+    # 4. 数据聚合 (处理同一时间戳可能存在的多笔交易)
+    # 买入聚合
+    entry_agg = pd.DataFrame({
+        'money_spent': money_spent,
+        'buy_units': bet_size
+    }).groupby(level=0).sum()
     
-    # 5. 计算持仓和现金流
-    # 记录买入和卖出的单位数量（用于持仓计算）
-    buy_units = pd.Series(bet_amount, index=barrier.index).groupby(level=0).sum()
-    sell_units = pd.Series(bet_amount.loc[exit_indices.index].values, index=exit_indices.values).groupby(level=0).sum()
+    # 卖出聚合 (注意：卖出动作发生在 exit_times)
+    exit_agg = pd.DataFrame({
+        'money_receive': money_received_vals,
+        'sell_units': bet_size.loc[entry_times_of_exited].values
+    }, index=exit_times).groupby(level=0).sum()
     
-    out['buy_amount'] = buy_units
-    out['sell_amount'] = sell_units
-    out = out.fillna(0)
+    # 5. 构建完整的时间序列账本
+    # 使用完整的 close.index 确保不遗漏任何时间点，这对 pyfolio 计算波动率至关重要
+    wallet = pd.DataFrame(index=close.index)
+    wallet = wallet.join(entry_agg).join(exit_agg).fillna(0)
     
+    # 6. 计算核心指标 (Level 累积值)
     # 当前持仓数量 (累加买入 - 累加卖出)
-    out['n_stock'] = (out['buy_amount'] - out['sell_amount']).cumsum()
+    wallet['n_stock'] = (wallet['buy_units'] - wallet['sell_units']).cumsum()
     
-    # 现金库存 (初始资金 - 支出 + 收入)
-    # 每一行的 cash_inventory 代表了扣除手续费和滑点后的真实可用现金
-    out['cash_inventory'] = (-out['money_spent'] + out['money_receive']).cumsum() + initial_money
+    # 现金账户余额 (初始资金 - 支出 + 收入)
+    wallet['cash_inventory'] = (-wallet['money_spent'] + wallet['money_receive']).cumsum() + initial_money
     
-    # 价格列用于后续计算市值
-    out['price'] = close
+    # 账户总价值 (Equity) = 现金 + 持仓市值
+    wallet['price'] = close
+    wallet['total_equity'] = wallet['cash_inventory'] + (wallet['n_stock'] * wallet['price'])
     
-    return out
+    # 7. 计算收益率 (Returns)
+    # pyfolio 需要的是每日收益率，这里先计算 15min 收益率
+    wallet['returns'] = wallet['total_equity'].pct_change().fillna(0)
+    
+    return wallet
 
 
 def show_results(wallet):
