@@ -18,7 +18,7 @@ def get_ta(df, mt):
                                            - ta.momentum.stoch_signal(high,low,close,14*mt))
     ti['macd_diff_{}_{}_9'.format(26*mt,12*mt)] = ta.trend.macd_diff(close,26*mt,12*mt,10)
     ti['dpo_{}'.format(20*mt)] = ta.trend.dpo(close,20*mt)
-    ti['aroon_{}'.format(25*mt)] = ta.trend.AroonIndicator(close,25*mt).aroon_indicator()
+    ti['aroon_{}'.format(25*mt)] = ta.trend.AroonIndicator(high, low, 25*mt).aroon_indicator()
     ti['mfv'] = (volume* ((close - low) - (high - close)) /(high - low))
     ti['eom_{}'.format(14*mt)] = ta.volume.EaseOfMovementIndicator(high,low,volume,14*mt).sma_ease_of_movement()
     ti['mfi_{}'.format(14*mt)] = ta.volume.money_flow_index(high,low,close,volume,14*mt)

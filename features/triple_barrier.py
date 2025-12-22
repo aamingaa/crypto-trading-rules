@@ -192,6 +192,81 @@ def get_wallet(close, barrier, initial_money=0, bet_size=None):
     out = out.fillna(0)
     return out
 
+
+def get_wallet_v2(close, barrier, initial_money=0, bet_size=None, fee_rate=0.0006, slippage=0.0001):
+    """
+    考虑手续费和滑点的钱包/持仓计算函数
+    
+    :param close: 价格序列 (pd.Series)
+    :param barrier: 障碍输出 (pd.DataFrame)，必须包含 'exit' 列（退出时间戳）
+    :param initial_money: 初始资金
+    :param bet_size: 下注数量序列，如果为 None 则每笔交易 1 个单位
+    :param fee_rate: 单边手续费率 (例如 0.0006 代表万六)
+    :param slippage: 滑点百分比 (例如 0.0001 代表 0.01% 的滑点)
+    :return: 包含资金和持仓变化的 DataFrame
+    """
+    close = close.round(2)
+    
+    # 1. 确定下注数量
+    if bet_size is None:
+        bet_size = pd.Series(np.ones(len(close)), index=close.index)
+    bet_amount = bet_size.loc[barrier.index]
+
+    # 2. 计算买入支出 (Money Spent)
+    # 实际买入价 = 现价 * (1 + 滑点)
+    buy_price = close.loc[barrier.index] * (1 + slippage)
+    # 支出 = 数量 * 价格 * (1 + 手续费率)
+    spend = (bet_amount * buy_price) * (1 + fee_rate)
+
+    # 3. 计算卖出收入 (Money Receive)
+    # 找到退出时的价格
+    exit_indices = barrier.exit.dropna()
+    exit_prices = close.loc[exit_indices].values
+    # 实际卖出价 = 现价 * (1 - 滑点)
+    sell_price = exit_prices * (1 - slippage)
+    # 收入 = 数量 * 卖出价 * (1 - 手续费率)
+    # 注意：这里关联的是进入时的索引
+    receive_at_entry = pd.Series(sell_price * bet_amount.loc[exit_indices.index].values, 
+                                 index=exit_indices.index)
+    
+    # 将收入归纳到“退出时间点”
+    close_exit = pd.Series(receive_at_entry.values, index=barrier.exit.dropna())
+    close_exit = close_exit.groupby(level=0).sum().rename('money_receive')
+
+    # 4. 构建基础钱包 DataFrame (以时间轴为索引)
+    # 我们需要一个完整的时间索引来处理资金和持仓的累积
+    all_indices = close.index
+    wallet_base = pd.DataFrame(index=all_indices)
+    
+    # 记录每笔交易的买入点和金额
+    entry_data = pd.DataFrame({'money_spent': spend}, index=barrier.index)
+    entry_data = entry_data.groupby(level=0).sum()
+    
+    # 合并数据
+    out = wallet_base.join(entry_data).join(close_exit).fillna(0)
+    
+    # 5. 计算持仓和现金流
+    # 记录买入和卖出的单位数量（用于持仓计算）
+    buy_units = pd.Series(bet_amount, index=barrier.index).groupby(level=0).sum()
+    sell_units = pd.Series(bet_amount.loc[exit_indices.index].values, index=exit_indices.values).groupby(level=0).sum()
+    
+    out['buy_amount'] = buy_units
+    out['sell_amount'] = sell_units
+    out = out.fillna(0)
+    
+    # 当前持仓数量 (累加买入 - 累加卖出)
+    out['n_stock'] = (out['buy_amount'] - out['sell_amount']).cumsum()
+    
+    # 现金库存 (初始资金 - 支出 + 收入)
+    # 每一行的 cash_inventory 代表了扣除手续费和滑点后的真实可用现金
+    out['cash_inventory'] = (-out['money_spent'] + out['money_receive']).cumsum() + initial_money
+    
+    # 价格列用于后续计算市值
+    out['price'] = close
+    
+    return out
+
+
 def show_results(wallet):
     """
     
