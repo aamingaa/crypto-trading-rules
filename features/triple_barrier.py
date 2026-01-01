@@ -81,6 +81,61 @@ def forming_barriers(close, events, pt_sl, molecule):
     return out
 
 
+def forming_barriers_fast(close, events, pt_sl, molecule): 
+    """
+    Optimized version of forming_barriers using numpy and integer indexing.
+    """
+    events_ = events.loc[molecule]
+    out = events_[['exit']].copy()
+
+    profit_taking_multiple = pt_sl[0]
+    stop_loss_multiple = pt_sl[1]
+
+    if profit_taking_multiple > 0:
+        profit_taking = profit_taking_multiple * events_['trgt']
+    else:
+        profit_taking = pd.Series(index=events_.index, data=np.inf)
+
+    if stop_loss_multiple > 0:
+        stop_loss = -stop_loss_multiple * events_['trgt']
+    else:
+        stop_loss = pd.Series(index=events_.index, data=-np.inf)
+
+    close_vals = close.values
+    close_index = close.index
+    
+    start_indices = close_index.get_indexer(events_.index)
+    end_indices = close_index.get_indexer(events_['exit'].fillna(close_index[-1]))
+    
+    sides = events_['side'].values
+    pt_vals = profit_taking.values
+    sl_vals = stop_loss.values
+    
+    sl_dates = [pd.NaT] * len(events_)
+    pt_dates = [pd.NaT] * len(events_)
+
+    for i in range(len(events_)):
+        s_idx = start_indices[i]
+        e_idx = end_indices[i]
+        if s_idx < 0 or e_idx < 0:
+            continue
+            
+        path_prices = close_vals[s_idx : e_idx + 1]
+        path_returns = (path_prices / close_vals[s_idx] - 1.0) * sides[i]
+        
+        sl_hits = np.where(path_returns < sl_vals[i])[0]
+        if len(sl_hits) > 0:
+            sl_dates[i] = close_index[s_idx + sl_hits[0]]
+            
+        pt_hits = np.where(path_returns > pt_vals[i])[0]
+        if len(pt_hits) > 0:
+            pt_dates[i] = close_index[s_idx + pt_hits[0]]
+
+    out['sl'] = sl_dates
+    out['pt'] = pt_dates
+    return out
+
+
 def get_barrier(close, enter, pt_sl, max_holding, target=None, side=None):
     """
 
@@ -138,6 +193,44 @@ def get_barrier(close, enter, pt_sl, max_holding, target=None, side=None):
     out_df['side'] = events['side']
     return out_df
 
+
+def get_barrier_fast(close, enter, pt_sl, max_holding, target=None, side=None):
+    """
+    Optimized version of get_barrier.
+    """
+    if target is None:
+        target_ = pd.Series(1.0, index=enter)
+    else:
+        target_ = target.reindex(enter)
+
+    vertical_barrier = add_vertical_barrier(enter, close, days=max_holding[0], hours=max_holding[1])
+
+    if side is None:
+        side_ = pd.Series(1.0, index=target_.index)
+        pt_sl_ = [pt_sl[0], pt_sl[1]]
+    else:
+        side_ = side.reindex(target_.index)
+        pt_sl_ = pt_sl[:2]
+
+    events = pd.concat({'exit': vertical_barrier, 'trgt': target_,'side': side_}, axis=1)
+    first_touch_dates = forming_barriers_fast(close, events, pt_sl_, events.index)
+    
+    events['exit'] = first_touch_dates.min(axis=1)
+    events_x = events.dropna(subset=['exit'])
+
+    out_df = pd.DataFrame(index=events.index)
+    out_df['exit'] = events['exit']
+    out_df['price'] = close.reindex(events.index)
+    out_df['side'] = events['side']
+    out_df['ret'] = 0.0
+    
+    if not events_x.empty:
+        exit_prices = close.loc[events_x['exit']].values
+        entry_prices = close.loc[events_x.index].values
+        out_df.loc[events_x.index, 'ret'] = (np.log(exit_prices) - np.log(entry_prices)) * events_x['side'].values
+        
+    return out_df
+
 def grid_pt_sl(pt,sl,close,enter,max_holding,side):
     """
     :param pt: list of profit taking target rate
@@ -152,7 +245,7 @@ def grid_pt_sl(pt,sl,close,enter,max_holding,side):
     for i in pt:
         for j in sl:
             pt_sl = [i,j]
-            df.loc[i,j] = get_barrier(close,enter,pt_sl,max_holding,side).ret.cumsum()[-1]
+            df.loc[i,j] = get_barrier_fast(close,enter,pt_sl,max_holding,side).ret.cumsum()[-1]
     return df
 
 def get_wallet(close, barrier, initial_money=0, bet_size=None):
