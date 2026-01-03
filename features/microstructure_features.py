@@ -172,3 +172,34 @@ def get_vpin(volume: pd.Series, buy_volume: pd.Series, window: int = 1) -> pd.Se
     sell_volume = volume - buy_volume
     volume_imbalance = abs(buy_volume - sell_volume)
     return volume_imbalance.rolling(window=window).mean() / volume
+
+
+def get_microstructure_features(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    """
+    Convenience function to get all microstructure features from a OHLCV DataFrame.
+    Assumes columns: 'open', 'high', 'low', 'close', 'volume'.
+    Optionally looks for 'buy_volume' (taker buy volume) or 'tb_base_av'.
+    """
+    close = pd.to_numeric(df['close'])
+    high = pd.to_numeric(df['high'])
+    low = pd.to_numeric(df['low'])
+    volume = pd.to_numeric(df['volume'])
+    dollar_volume = pd.to_numeric(df['quote_av'])
+
+    features = pd.DataFrame(index=df.index)
+    
+    features[f'roll_measure_{window}'] = get_roll_measure(close, window)
+    features[f'roll_impact_{window}'] = get_roll_impact(close, dollar_volume, window)
+    features[f'corwin_schultz_spread_{window}'] = get_corwin_schultz_estimator(high, low, window)
+    features[f'bekker_parkinson_vol_{window}'] = get_bekker_parkinson_vol(high, low, window)
+    features[f'kyle_lambda_{window}'] = get_bar_based_kyle_lambda(close, volume, window)
+    features[f'amihud_lambda_{window}'] = get_bar_based_amihud_lambda(close, dollar_volume, window)
+    features[f'hasbrouck_lambda_{window}'] = get_bar_based_hasbrouck_lambda(close, dollar_volume, window)
+    
+    # If taker buy volume is available, calculate VPIN
+    if 'buy_volume' in df.columns:
+        features[f'vpin_{window}'] = get_vpin(volume, pd.to_numeric(df['buy_volume']), window)
+    elif 'tb_base_av' in df.columns:
+        features[f'vpin_{window}'] = get_vpin(volume, pd.to_numeric(df['tb_base_av']), window)
+        
+    return features

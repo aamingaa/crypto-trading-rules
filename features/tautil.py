@@ -135,9 +135,9 @@ def get_stationary_ta_window_0(
     open='open';high='high';low='low';close='close';volume='volume'
     
     # Accumulation Distribution Index
-    df["volume_adi"] = AccDistIndexIndicator(
-        high=df[high], low=df[low], close=df[close], volume=df[volume], fillna=fillna
-    ).acc_dist_index()
+    # df["volume_adi"] = AccDistIndexIndicator(
+    #     high=df[high], low=df[low], close=df[close], volume=df[volume], fillna=fillna
+    # ).acc_dist_index()
 
     # Chaikin Money Flow
     df["volume_cmf_{}".format(20*mt)] = ChaikinMoneyFlowIndicator(
@@ -164,13 +164,13 @@ def get_stationary_ta_window_0(
     indicator_eom = EaseOfMovementIndicator(
         high=df[high], low=df[low], volume=df[volume], window=15*mt, fillna=fillna
     )
-    df["volume_em"] = indicator_eom.ease_of_movement()
+    df[f"volume_em_{mt}"] = indicator_eom.ease_of_movement()
     df["volume_sma_em_{}".format(15*mt)] = indicator_eom.sma_ease_of_movement()
 
     # Volume Price Trend
-    df["volume_vpt"] = VolumePriceTrendIndicator(
-        close=df[close], volume=df[volume], fillna=fillna
-    ).volume_price_trend()
+    # df["volume_vpt"] = VolumePriceTrendIndicator(
+    #     close=df[close], volume=df[volume], fillna=fillna
+    # ).volume_price_trend()
 
 
     # Average True Range
@@ -252,7 +252,7 @@ def get_stationary_ta_window_0(
 
 
     # Aroon Indicator
-    indicator_aroon = AroonIndicator(close=df[close], window=20, fillna=fillna)
+    indicator_aroon = AroonIndicator(high=df[high], low=df[low], window=20*mt, fillna=fillna)
     df["trend_aroon_ind_{}".format(20*mt)] = indicator_aroon.aroon_indicator()
 
 

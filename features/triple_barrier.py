@@ -361,6 +361,164 @@ def get_wallet_v2(close, barrier, initial_money=10000, bet_size=None, fee_rate=0
     
     return wallet
 
+import pandas as pd
+import numpy as np
+
+def get_wallet_ratio_based_simple(close, barrier, bet_size=None, initial_money=10000, max_pos=1, fee_rate=0.0006, slippage=0.0001):
+    """
+    基于资金占比 (bet_size as ratio) 的回测系统 - 简化版
+    去掉 numpy 加速，使用原生 pandas .loc 查找，逻辑更直观
+    """
+    # 1. 数据清洗与索引格式化
+    close.index = pd.to_datetime(close.index)
+    barrier.index = pd.to_datetime(barrier.index)
+    
+    # 2. 处理 bet_size
+    # 如果没传，或者传入的是 None，构造一个全为 1.0 的 Series
+    if bet_size is None:
+        bet_size = pd.Series(1.0, index=barrier.index)
+    else:
+        bet_size.index = pd.to_datetime(bet_size.index)
+        # 确保 bet_size 覆盖 barrier 的索引，缺失填 1.0
+        bet_size = bet_size.reindex(barrier.index).fillna(1.0)
+
+    # 3. 初始化变量
+    current_cash = initial_money
+    current_pos = 0.0      # 当前持有的币数
+    
+    open_positions = []    # 持仓队列 [{'exit_time':..., 'units':...}]
+    real_trades = []       # 交易流水
+    
+    # 4. 遍历每一个买入信号
+    # 直接遍历 barrier 的索引
+    for t_entry in barrier.index:
+        
+        # 保护：如果信号时间不在 close 数据里，跳过
+        if t_entry not in close.index:
+            continue
+            
+        # 获取当前行数据
+        # 使用 .loc 直接查找，速度较慢但可读性高
+        t_exit = barrier.loc[t_entry, 'exit']
+        current_price = close.loc[t_entry]
+        
+        # --- A. 先处理卖出 (释放资金) ---
+        # 检查 open_positions 里是否有需要在此刻(或之前)平仓的
+        still_open = []
+        for pos in open_positions:
+            # 如果预定的卖出时间早于或等于当前时间，说明该卖了
+            if pos['exit_time'] <= t_entry:
+                exit_t = pos['exit_time']
+                
+                # 确定卖出价格
+                if exit_t in close.index:
+                    price_exit = close.loc[exit_t]
+                else:
+                    # 如果退出时间在K线图中找不到（比如停牌或数据缺失），用当前价兜底
+                    price_exit = current_price 
+                
+                # 执行卖出
+                sell_price = price_exit * (1 - slippage)
+                revenue = (pos['units'] * sell_price) * (1 - fee_rate)
+                
+                current_cash += revenue
+                current_pos -= pos['units']
+                
+                real_trades.append({
+                    'time': exit_t, 
+                    'type': 'sell', 
+                    'cash_delta': revenue, 
+                    'pos_delta': -pos['units']
+                })
+            else:
+                # 还没到时间，继续持有
+                still_open.append(pos)
+        
+        # 更新持仓列表
+        open_positions = still_open
+        
+        # --- B. 计算当前账户总权益 (Total Equity) ---
+        # 权益 = 现金 + 持仓市值 (用当前 entry 价格估算)
+        total_equity = current_cash + (current_pos * current_price)
+        
+        # --- C. 决定买入数量 ---
+        
+        # 1. 检查最大持仓单数限制
+        if len(open_positions) >= max_pos:
+            continue
+            
+        # 2. 获取本单计划占比 (Ratio)
+        ratio = bet_size.loc[t_entry]
+        
+        if ratio <= 0: continue
+        
+        # 3. 计算【目标交易金额】
+        # 逻辑：我有多少总身家 * 我想下注的百分比
+        target_money_to_spend = total_equity * ratio
+        
+        # 4. 计算【理论需要买入的单位数】
+        buy_price = current_price * (1 + slippage)
+        # 公式推导：花费 = 数量 * 单价 * (1+费率)  => 数量 = 花费 / (单价 * (1+费率))
+        target_units = target_money_to_spend / (buy_price * (1 + fee_rate))
+        
+        # 5. 【资金兜底检查】 (Reality Check)
+        # 就算你想买100万，但你现金只有50万，那你最多只能买50万
+        max_affordable_units = current_cash / (buy_price * (1 + fee_rate))
+        
+        # 最终下单数量取较小值 (理想 vs 现实)
+        final_units = min(target_units, max_affordable_units)
+        
+        # 过滤过小的碎股
+        if final_units < 0.000001:
+            continue
+            
+        # --- D. 执行买入 ---
+        cost = (final_units * buy_price) * (1 + fee_rate)
+        
+        current_cash -= cost
+        current_pos += final_units
+        
+        open_positions.append({
+            'exit_time': t_exit,
+            'units': final_units
+        })
+        
+        real_trades.append({
+            'time': t_entry, 
+            'type': 'buy',
+            'cash_delta': -cost, 
+            'pos_delta': final_units
+        })
+
+    # === 5. 数据聚合与输出 ===
+    # 如果没交易，直接返回空账本
+    if not real_trades:
+        empty_wallet = pd.DataFrame(index=close.index)
+        empty_wallet['total_equity'] = initial_money
+        return empty_wallet
+
+    # 聚合交易流水
+    df_trades = pd.DataFrame(real_trades)
+    # 按时间聚合现金和持仓变动
+    df_agg = df_trades.groupby('time')[['cash_delta', 'pos_delta']].sum()
+    
+    # 扩展到完整时间轴
+    wallet = pd.DataFrame(index=close.index)
+    wallet = wallet.join(df_agg).fillna(0)
+    
+    # 计算累计状态
+    wallet['cash_inventory'] = wallet['cash_delta'].cumsum() + initial_money
+    wallet['n_stock'] = wallet['pos_delta'].cumsum()
+    
+    # 计算总资产曲线
+    wallet['price'] = close
+    wallet['total_equity'] = wallet['cash_inventory'] + (wallet['n_stock'] * wallet['price'])
+    
+    # 计算收益率
+    wallet['returns'] = wallet['total_equity'].pct_change().fillna(0)
+    
+    return wallet
+
 
 def show_results(wallet):
     """
