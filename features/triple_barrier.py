@@ -4,6 +4,44 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+
+def cusum_filter(series: pd.Series, threshold: float) -> pd.DatetimeIndex:
+    """
+    对应 Lopez de Prado《AFML》里的对称 CUSUM 过滤器（Snippet 2.4/2.5 风格）。
+
+    Parameters
+    ----------
+    series : pd.Series
+        一般传入价格的对数或收益序列，index 为时间。
+    threshold : float
+        CUSUM 阈值（绝对值越大，触发的事件越少）。
+
+    Returns
+    -------
+    pd.DatetimeIndex
+        触发事件的时间索引（用于后续 Triple Barrier 的 enter）。
+    """
+    series = series.astype(float)
+    diff = series.diff().dropna()
+
+    t_events = []
+    s_pos, s_neg = 0.0, 0.0
+
+    for t in diff.index:
+        d = diff.loc[t]
+        s_pos = max(0.0, s_pos + d)
+        s_neg = min(0.0, s_neg + d)
+
+        if s_pos > threshold:
+            s_pos = 0.0
+            t_events.append(t)
+        elif s_neg < -threshold:
+            s_neg = 0.0
+            t_events.append(t)
+
+    return pd.DatetimeIndex(t_events)
+
+
 def add_vertical_barrier(t_events, close, days=0, hours=0, minutes=0, seconds=0):
     """
     Advances in Financial Machine Learning, Snippet 3.4 page 49.
