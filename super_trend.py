@@ -4,6 +4,34 @@ import ta
 from ta.trend import EMAIndicator, SMAIndicator, WMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
+from dataload import data_load_v2
+
+sym = 'ETHUSDT'
+data_dir = '/Users/aming/data/ETHUSDT/15m'
+start_date_train = '2025-01-01'
+end_date_train = '2025-06-01'
+start_date_test = '2025-06-01'
+end_date_test = '2025-09-01'
+timeframe =  '15m'
+
+df_15min = data_load_v2(sym, data_dir=data_dir, start_date=start_date_train, end_date=end_date_test,
+                        timeframe=timeframe, file_path=None)
+
+
+column_mapping = {
+    'o':'open',
+    'h':'high',
+    'l':'low',
+    'c':'close',
+    'vol':'volume',
+    'vol_ccy':'quote_av',
+    'trades':'count',
+    'close_time':'close_time',
+    'taker_buy_volume':'tb_base_av',
+    'taker_buy_quote_volume':'tb_quote_av'
+
+}
+df_15min = df_15min.rename(columns=column_mapping)
 
 # ==============================
 # 1. 数据准备（模拟数据/真实数据）
@@ -273,8 +301,18 @@ def process_multi_tf(df_1h):
 # 4. 运行测试
 # ==============================
 if __name__ == '__main__':
+
+
     # 1. 获取模拟数据
-    df_1h = get_sample_data()
+    df_1h = df_15min.resample('1h', label='left', closed='left').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+
+
     
     # 2. 多周期处理 + 生成信号
     df_result = process_multi_tf(df_1h)
