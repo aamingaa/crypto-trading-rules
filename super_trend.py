@@ -304,7 +304,148 @@ def process_multi_tf(df_1h):
     return df_merged
 
 # ==============================
-# 4. 运行测试
+# 4. 回测模块
+# ==============================
+def run_backtest(df, initial_capital=10000, commission=0.001):
+    """
+    执行回测，根据买卖信号模拟交易
+    :param df: 包含buy_signal/sell_signal的DataFrame
+    :param initial_capital: 初始资金
+    :param commission: 手续费率（双边）
+    :return: 包含持仓、收益等信息的DataFrame
+    """
+    df_bt = df.copy()
+    
+    # 初始化列
+    df_bt['position'] = 0  # 当前持仓：0=空仓，1=多头，-1=空头
+    df_bt['entry_price'] = np.nan  # 入场价格
+    df_bt['cash'] = float(initial_capital)  # 现金
+    df_bt['holdings'] = 0.0  # 持仓市值
+    df_bt['total'] = float(initial_capital)  # 总资产
+    df_bt['returns'] = 0.0  # 收益率
+    
+    position = 0  # 当前持仓状态
+    entry_price = 0  # 入场价格
+    cash = float(initial_capital)
+    shares = 0  # 持仓数量
+    
+    for i in range(len(df_bt)):
+        curr_price = df_bt['close'].iloc[i]
+        
+        # 买入信号
+        if df_bt['buy_signal'].iloc[i] and position == 0:
+            # 全仓买入
+            shares = cash / (curr_price * (1 + commission))
+            entry_price = curr_price
+            cash = 0
+            position = 1
+            
+        # 卖出信号（平多仓）
+        elif df_bt['sell_signal'].iloc[i] and position == 1:
+            # 卖出所有持仓
+            cash = shares * curr_price * (1 - commission)
+            shares = 0
+            position = 0
+            entry_price = 0
+        
+        # 更新当前状态
+        df_bt.loc[df_bt.index[i], 'position'] = position
+        df_bt.loc[df_bt.index[i], 'entry_price'] = entry_price if position != 0 else np.nan
+        df_bt.loc[df_bt.index[i], 'cash'] = cash
+        df_bt.loc[df_bt.index[i], 'holdings'] = shares * curr_price if position != 0 else 0
+        df_bt.loc[df_bt.index[i], 'total'] = cash + shares * curr_price
+    
+    # 计算收益率
+    df_bt['returns'] = df_bt['total'].pct_change().fillna(0)
+    df_bt['cum_returns'] = (1 + df_bt['returns']).cumprod() - 1
+    
+    return df_bt
+
+def calculate_performance_metrics(df_bt, risk_free_rate=0.02):
+    """
+    计算回测性能指标
+    :param df_bt: 回测结果DataFrame
+    :param risk_free_rate: 无风险利率（年化）
+    :return: 性能指标字典
+    """
+    # 基础数据
+    initial_capital = df_bt['total'].iloc[0]
+    final_capital = df_bt['total'].iloc[-1]
+    returns = df_bt['returns']
+    
+    # 1. 总收益率
+    total_return = (final_capital - initial_capital) / initial_capital
+    
+    # 2. 年化收益率
+    days = (df_bt.index[-1] - df_bt.index[0]).days
+    years = days / 365.25
+    annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
+    
+    # 3. 年化波动率
+    annual_volatility = returns.std() * np.sqrt(365.25 * 24)  # 小时数据转年化
+    
+    # 4. Sharpe比率
+    excess_return = annual_return - risk_free_rate
+    sharpe_ratio = excess_return / annual_volatility if annual_volatility != 0 else 0
+    
+    # 5. 最大回撤
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.expanding().max()
+    drawdown = (cumulative - running_max) / running_max
+    max_drawdown = drawdown.min()
+    
+    # 6. Calmar比率（年化收益/最大回撤）
+    calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0
+    
+    # 7. 胜率统计
+    trades = df_bt[df_bt['position'].diff() != 0].copy()
+    trade_returns = []
+    
+    for i in range(len(trades) - 1):
+        if trades['position'].iloc[i] == 1:  # 开仓
+            entry_price = trades['close'].iloc[i]
+            # 找到下一个平仓点
+            exit_idx = i + 1
+            if exit_idx < len(trades):
+                exit_price = trades['close'].iloc[exit_idx]
+                trade_return = (exit_price - entry_price) / entry_price - 0.002  # 扣除双边手续费
+                trade_returns.append(trade_return)
+    
+    if len(trade_returns) > 0:
+        win_rate = sum(1 for r in trade_returns if r > 0) / len(trade_returns)
+        avg_win = np.mean([r for r in trade_returns if r > 0]) if any(r > 0 for r in trade_returns) else 0
+        avg_loss = np.mean([r for r in trade_returns if r < 0]) if any(r < 0 for r in trade_returns) else 0
+        profit_factor = abs(sum([r for r in trade_returns if r > 0]) / sum([r for r in trade_returns if r < 0])) if sum([r for r in trade_returns if r < 0]) != 0 else 0
+    else:
+        win_rate = 0
+        avg_win = 0
+        avg_loss = 0
+        profit_factor = 0
+    
+    # 8. 其他指标
+    num_trades = len(trade_returns)
+    
+    metrics = {
+        '总收益率': f'{total_return:.2%}',
+        '年化收益率': f'{annual_return:.2%}',
+        '年化波动率': f'{annual_volatility:.2%}',
+        'Sharpe比率': f'{sharpe_ratio:.3f}',
+        '最大回撤': f'{max_drawdown:.2%}',
+        'Calmar比率': f'{calmar_ratio:.3f}',
+        '交易次数': num_trades,
+        '胜率': f'{win_rate:.2%}',
+        '平均盈利': f'{avg_win:.2%}',
+        '平均亏损': f'{avg_loss:.2%}',
+        '盈亏比': f'{profit_factor:.2f}',
+        '回测天数': days,
+        '初始资金': f'${initial_capital:,.2f}',
+        '最终资金': f'${final_capital:,.2f}'
+    }
+    
+    return metrics
+
+# ==============================
+# 5. 运行测试 + 回测
 # ==============================
 if __name__ == '__main__':
 
@@ -331,3 +472,21 @@ if __name__ == '__main__':
     print(f"\n=== 信号统计 ===")
     print(f"买入信号总数：{df_result['buy_signal'].sum()}")
     print(f"卖出信号总数：{df_result['sell_signal'].sum()}")
+    
+    # 4. 执行回测
+    print("\n=== 执行回测 ===")
+    df_backtest = run_backtest(df_result, initial_capital=10000, commission=0.001)
+    
+    # 5. 计算性能指标
+    print("\n=== 回测性能指标 ===")
+    metrics = calculate_performance_metrics(df_backtest)
+    for key, value in metrics.items():
+        print(f"{key}: {value}")
+    
+    # 6. 输出资金曲线（可选）
+    print("\n=== 资金曲线（最后10个交易点）===")
+    print(df_backtest[['close', 'position', 'total', 'cum_returns']].tail(10))
+    
+    # 7. 保存回测结果（可选）
+    # df_backtest.to_csv('backtest_results.csv')
+    # print("\n回测结果已保存至 backtest_results.csv")
