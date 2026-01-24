@@ -126,7 +126,6 @@ def calculate_supertrend(df, period=9, multiplier=3.9, change_atr=True):
 
 def calculate_heikin_ashi(df):
     """计算Heikin-Ashi（平均K线），修复KeyError + 优化赋值警告"""
-    # 1. 深拷贝避免修改原数据，同时防止SettingWithCopyWarning
     ha_df = df.copy(deep=True)
     
     # 2. 计算HA收盘价（先添加列，避免后续KeyError）
@@ -138,9 +137,8 @@ def calculate_heikin_ashi(df):
     for i in range(1, len(ha_df)):
         prev_idx = ha_df.index[i-1]
         curr_idx = ha_df.index[i]
-        ha_df.loc[curr_idx, 'ha_open'] = (ha_df.loc[prev_idx, 'ha_open'] + ha_df.loc[prev_idx, 'ha_close']) / 4
+        ha_df.loc[curr_idx, 'ha_open'] = (ha_df.loc[prev_idx, 'ha_open'] + ha_df.loc[prev_idx, 'ha_close']) / 2
     
-    # 4. 修复KeyError：从ha_df中读取ha_open/ha_close（而非原始df）
     ha_df['ha_high'] = ha_df[['high', 'ha_open', 'ha_close']].max(axis=1)
     ha_df['ha_low'] = ha_df[['low', 'ha_open', 'ha_close']].min(axis=1)
     
@@ -209,7 +207,7 @@ def calculate_qqe_mod(df, rsi_length=6, rsi_smoothing=5, qqe_factor=3.0, thresho
     # 5. 布林带过滤（核心修正2：用pandas原生滚动标准差替代ta库不存在的类）
     bb_basis = SMAIndicator(close=prim_trend_shifted, window=bb_length).sma_indicator()
     # 修正：用pandas rolling.std()计算滚动标准差，和原逻辑一致
-    bb_dev = bb_multiplier * prim_trend_shifted.rolling(window=bb_length).std()
+    bb_dev = bb_multiplier * prim_trend_shifted.rolling(window=bb_length).std(ddof=0)
     bb_upper = bb_basis + bb_dev
     bb_lower = bb_basis - bb_dev
     
@@ -282,18 +280,26 @@ def process_multi_tf(df_1h):
     }).dropna()
     
     # 3. 4H数据计算指标
-    df_4h_with_ind = calculate_single_tf_indicators(df_4h)
+    df_htf_with_ind = calculate_single_tf_indicators(df_4h)
     
     # 4. 4H趋势对齐到1H（向前填充）
     htf_cols = ['concrete_bull', 'concrete_bear']
-    df_4h_aligned = df_4h_with_ind[htf_cols].resample('1H').ffill()
+
+    df_htf_shifted = df_htf_with_ind[htf_cols].shift(1)
+    # df_4h_aligned = df_htf_with_ind[htf_cols].shift(1)
+    
+    df_htf_aligned = df_htf_shifted.resample('1H').ffill()
+    # .resample('1H').ffill()
     
     # 5. 合并到1H数据
-    df_merged = df_1h_with_ind.join(df_4h_aligned, rsuffix='_4h')
+    df_merged = df_1h_with_ind.join(df_htf_aligned, rsuffix='_htf')
     
+    cols_to_fix = ['concrete_bull_htf', 'concrete_bear_htf']
+    df_merged[cols_to_fix] = df_merged[cols_to_fix].fillna(False)
+
     # 6. 生成最终买卖信号
-    df_merged['buy_signal'] = df_merged['concrete_bull'] & df_merged['concrete_bull_4h']
-    df_merged['sell_signal'] = df_merged['concrete_bear'] & df_merged['concrete_bear_4h']
+    df_merged['buy_signal'] = df_merged['concrete_bull'] & df_merged['concrete_bull_htf']
+    df_merged['sell_signal'] = df_merged['concrete_bear'] & df_merged['concrete_bear_htf']
     
     return df_merged
 
@@ -319,7 +325,7 @@ if __name__ == '__main__':
     
     # 3. 输出结果（查看信号）
     print("=== 策略信号结果（前20行）===")
-    print(df_result[['close', 'st_trend', 'concrete_bull', 'concrete_bull_4h', 'buy_signal', 'sell_signal']].head(20))
+    print(df_result.head(20))
     
     # 统计信号数量
     print(f"\n=== 信号统计 ===")
